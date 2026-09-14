@@ -766,11 +766,10 @@ def compare_schedules(our_wb, team_wb):
         for block in blocks:
             slots = tf_get_slots_for_block(team_ws, block)
             for slot in slots:
-                sr, sc = slot["subject_cell"]
                 tr, tc = slot["title_cell"]
                 lr, lc = slot["link_cell"]
 
-                for (r, c), field_name in [((sr, sc), "المادة"), ((tr, tc), "عنوان الدرس"), ((lr, lc), "رابط اليوتيوب")]:
+                for (r, c), field_name in [((tr, tc), "عنوان الدرس"), ((lr, lc), "رابط اليوتيوب")]:
                     our_val = our_ws.cell(row=r, column=c).value
                     team_val = team_ws.cell(row=r, column=c).value
                     our_norm = str(our_val).strip() if our_val is not None else ""
