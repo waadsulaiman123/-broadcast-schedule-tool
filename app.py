@@ -14,6 +14,7 @@ app.py — نظام إدارة جداول البث (النسخة الأولى ا
 import streamlit as st
 import pandas as pd
 import openpyxl
+from openpyxl.styles import PatternFill
 import io
 import re
 import base64
@@ -698,118 +699,250 @@ def tf_generate_and_fill(template_wb, subject_dfs: dict, calendar_weeks_df=None,
 # ============================================================
 # الواجهة
 # ============================================================
+# ============================================================
+# جديد: محرك مقارنة جدولين (جدولنا مقابل جدول الفريق) — نفس القالب،
+# نفحص كل خانة (مادة/عنوان درس/رابط) ونلوّن أي اختلاف بالأحمر في نسخة
+# من ملف الفريق، ونرجّع قائمة بكل الاختلافات المكتشفة.
+# ============================================================
+_CMP_RED_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+
+
+def compare_schedules(our_wb, team_wb):
+    """
+    our_wb: الملف اللي طلّعه برنامجنا (المرجع الصحيح)
+    team_wb: ملف الفريق (نلوّن الاختلافات فيه ونرجّعه)
+    يرجّع: (team_wb الملوَّن، قائمة تفاصيل الاختلافات، قائمة تحذيرات هيكلية)
+    """
+    diffs = []
+    warnings = []
+
+    common_sheets = [s for s in team_wb.sheetnames if s in our_wb.sheetnames]
+    missing_in_team = [s for s in our_wb.sheetnames if s not in team_wb.sheetnames]
+    extra_in_team = [s for s in team_wb.sheetnames if s not in our_wb.sheetnames]
+
+    if missing_in_team:
+        warnings.append(f"⚠️ أوراق موجودة بجدولنا وناقصة بجدول الفريق: {', '.join(missing_in_team)}")
+    if extra_in_team:
+        warnings.append(f"⚠️ أوراق زايدة بجدول الفريق مو موجودة بجدولنا: {', '.join(extra_in_team)}")
+
+    for sheet_name in common_sheets:
+        our_ws = our_wb[sheet_name]
+        team_ws = team_wb[sheet_name]
+        blocks = tf_find_grade_blocks(team_ws)
+
+        for block in blocks:
+            slots = tf_get_slots_for_block(team_ws, block)
+            for slot in slots:
+                sr, sc = slot["subject_cell"]
+                tr, tc = slot["title_cell"]
+                lr, lc = slot["link_cell"]
+
+                for (r, c), field_name in [((sr, sc), "المادة"), ((tr, tc), "عنوان الدرس"), ((lr, lc), "رابط اليوتيوب")]:
+                    our_val = our_ws.cell(row=r, column=c).value
+                    team_val = team_ws.cell(row=r, column=c).value
+                    our_norm = str(our_val).strip() if our_val is not None else ""
+                    team_norm = str(team_val).strip() if team_val is not None else ""
+                    if our_norm != team_norm:
+                        team_ws.cell(row=r, column=c).fill = _CMP_RED_FILL
+                        diffs.append({
+                            "الورقة": sheet_name, "الصف": block["grade"], "اليوم": slot["day"],
+                            "الحصة": slot["period"], "الحقل": field_name,
+                            "عندنا": our_norm or "(فاضي)", "عند الفريق": team_norm or "(فاضي)",
+                        })
+
+    return team_wb, diffs, warnings
+
+
 st.caption("النسخة الأولى (Prototype شخصي) — بُنيت للتعلّم والتجربة، بهوية التعليمية 2026")
 st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
 
-st.markdown("""
-<div class="step-card">
-    <div class="step-head">
-        <div class="step-num">١</div>
-        <p class="step-title">رفع الملفات</p>
-    </div>
-    <p class="step-sub">
-        ارفعي ملف "جدول البث" — قالب أسبوع واحد فاضٍ (خانات المواد معبّاة، عنوان الدرس ورابط اليوتيوب فاضيين)،
-        ملف أو أكثر لكل مادة (فيه عنوان الدرس ورابط اليوتيوب مرتبين بنفس تسلسل الحصص)،
-        وملف التقويم الدراسي (فيه ورقتين: الأسابيع + الإجازات).
-    </p>
-</div>
-""", unsafe_allow_html=True)
 
-col_a, col_b = st.columns(2)
-with col_a:
-    template_file = st.file_uploader("📋 ملف جدول البث (القالب الفاضي — أسبوع واحد)", type=["xlsx"], key="tf_template")
-    calendar_file = st.file_uploader(
-        "🗓️ ملف التقويم الدراسي (الأسابيع + الإجازات)",
-        type=["xlsx"], key="tf_calendar",
-    )
-with col_b:
-    subject_files = st.file_uploader(
-        "📚 ملفات المواد (وحدة أو أكثر — اسم كل ملف يُعتبر اسم المادة)",
-        type=["xlsx"], accept_multiple_files=True, key="tf_subjects",
-    )
-    target_semester = st.radio("📆 الفصل الدراسي المطلوب توليده", ["الأول", "الثاني"], horizontal=True)
+app_mode = st.radio(
+    "وش تبين تسوين؟",
+    ["🧩 توليد جدول جديد", "🔍 مقارنة جدولين (جدولنا مقابل جدول الفريق)"],
+    horizontal=True,
+)
+st.divider()
 
-if template_file and subject_files and calendar_file:
-    subject_dfs = {}
-    for f in subject_files:
-        subject_name = f.name.rsplit(".", 1)[0]
-        subject_dfs[subject_name] = pd.read_excel(f, sheet_name=None)
-
-    try:
-        calendar_weeks_df = pd.read_excel(calendar_file, sheet_name="الأسابيع")
-        holidays_df = pd.read_excel(calendar_file, sheet_name="الإجازات")
-    except Exception as e:
-        st.markdown(
-            f'<div class="result-banner warn">⚠️ ما قدرنا نقرأ ملف التقويم — تأكدي إن فيه ورقتين بالاسم بالضبط '
-            f'"الأسابيع" و"الإجازات" ({type(e).__name__}).</div>',
-            unsafe_allow_html=True,
-        )
-        st.stop()
-
+if app_mode == "🧩 توليد جدول جديد":
     st.markdown("""
     <div class="step-card">
         <div class="step-head">
-            <div class="step-num">٢</div>
-            <p class="step-title">توليد وتعبئة الجدول</p>
+            <div class="step-num">١</div>
+            <p class="step-title">رفع الملفات</p>
         </div>
-        <p class="step-sub">اضغطي الزر وانتظري — البرنامج يولّد أسابيع الفصل المختار كاملة ويعبّيها من ملفات موادك.</p>
+        <p class="step-sub">
+            ارفعي ملف "جدول البث" — قالب أسبوع واحد فاضٍ (خانات المواد معبّاة، عنوان الدرس ورابط اليوتيوب فاضيين)،
+            ملف أو أكثر لكل مادة (فيه عنوان الدرس ورابط اليوتيوب مرتبين بنفس تسلسل الحصص)،
+            وملف التقويم الدراسي (فيه ورقتين: الأسابيع + الإجازات).
+        </p>
     </div>
     """, unsafe_allow_html=True)
 
-    if st.button("🧩 ولّدي الأسابيع وعبّي القالب", type="primary"):
-        with st.spinner("جاري التوليد والتعبئة..."):
-            template_wb = openpyxl.load_workbook(template_file, data_only=True)
-            filled_wb, tf_warnings, tf_summary = tf_generate_and_fill(
-                template_wb, subject_dfs, calendar_weeks_df, holidays_df, target_semester=target_semester
+    col_a, col_b = st.columns(2)
+    with col_a:
+        template_file = st.file_uploader("📋 ملف جدول البث (القالب الفاضي — أسبوع واحد)", type=["xlsx"], key="tf_template")
+        calendar_file = st.file_uploader(
+            "🗓️ ملف التقويم الدراسي (الأسابيع + الإجازات)",
+            type=["xlsx"], key="tf_calendar",
+        )
+    with col_b:
+        subject_files = st.file_uploader(
+            "📚 ملفات المواد (وحدة أو أكثر — اسم كل ملف يُعتبر اسم المادة)",
+            type=["xlsx"], accept_multiple_files=True, key="tf_subjects",
+        )
+        target_semester = st.radio("📆 الفصل الدراسي المطلوب توليده", ["الأول", "الثاني"], horizontal=True)
+
+    if template_file and subject_files and calendar_file:
+        subject_dfs = {}
+        for f in subject_files:
+            subject_name = f.name.rsplit(".", 1)[0]
+            subject_dfs[subject_name] = pd.read_excel(f, sheet_name=None)
+
+        try:
+            calendar_weeks_df = pd.read_excel(calendar_file, sheet_name="الأسابيع")
+            holidays_df = pd.read_excel(calendar_file, sheet_name="الإجازات")
+        except Exception as e:
+            st.markdown(
+                f'<div class="result-banner warn">⚠️ ما قدرنا نقرأ ملف التقويم — تأكدي إن فيه ورقتين بالاسم بالضبط '
+                f'"الأسابيع" و"الإجازات" ({type(e).__name__}).</div>',
+                unsafe_allow_html=True,
             )
-            buf = io.BytesIO()
-            filled_wb.save(buf)
-        st.session_state["tf_filled_wb_bytes"] = buf.getvalue()
-        st.session_state["tf_warnings"] = tf_warnings
-        st.session_state["tf_summary"] = tf_summary
-        st.session_state["tf_n_weeks"] = len(filled_wb.sheetnames)
+            st.stop()
 
-    if st.session_state.get("tf_filled_wb_bytes"):
-        tf_warnings = st.session_state.get("tf_warnings", [])
-        tf_summary = st.session_state.get("tf_summary", [])
-        n_warn = len(tf_warnings)
-        n_weeks = st.session_state.get('tf_n_weeks', 0)
-
-        st.markdown(f"""
-        <div class="stat-row">
-            <div class="stat-card ok"><div class="num">{n_weeks}</div><div class="lbl">أسبوع تم توليده</div></div>
-            <div class="stat-card {'ok' if n_warn == 0 else 'warn'}"><div class="num">{n_warn}</div><div class="lbl">ملاحظة نقص محتوى</div></div>
-            <div class="stat-card"><div class="num">{len(subject_files)}</div><div class="lbl">ملف مادة مرفوع</div></div>
+        st.markdown("""
+        <div class="step-card">
+            <div class="step-head">
+                <div class="step-num">٢</div>
+                <p class="step-title">توليد وتعبئة الجدول</p>
+            </div>
+            <p class="step-sub">اضغطي الزر وانتظري — البرنامج يولّد أسابيع الفصل المختار كاملة ويعبّيها من ملفات موادك.</p>
         </div>
         """, unsafe_allow_html=True)
 
-        with st.expander("🔍 تشخيص: وش اكتُشف من ملفات المواد اللي رفعتيها", expanded=(n_warn > 20)):
-            if tf_summary:
-                st.table(pd.DataFrame(tf_summary))
+        if st.button("🧩 ولّدي الأسابيع وعبّي القالب", type="primary"):
+            with st.spinner("جاري التوليد والتعبئة..."):
+                template_wb = openpyxl.load_workbook(template_file, data_only=True)
+                filled_wb, tf_warnings, tf_summary = tf_generate_and_fill(
+                    template_wb, subject_dfs, calendar_weeks_df, holidays_df, target_semester=target_semester
+                )
+                buf = io.BytesIO()
+                filled_wb.save(buf)
+            st.session_state["tf_filled_wb_bytes"] = buf.getvalue()
+            st.session_state["tf_warnings"] = tf_warnings
+            st.session_state["tf_summary"] = tf_summary
+            st.session_state["tf_n_weeks"] = len(filled_wb.sheetnames)
+
+        if st.session_state.get("tf_filled_wb_bytes"):
+            tf_warnings = st.session_state.get("tf_warnings", [])
+            tf_summary = st.session_state.get("tf_summary", [])
+            n_warn = len(tf_warnings)
+            n_weeks = st.session_state.get('tf_n_weeks', 0)
+
+            st.markdown(f"""
+            <div class="stat-row">
+                <div class="stat-card ok"><div class="num">{n_weeks}</div><div class="lbl">أسبوع تم توليده</div></div>
+                <div class="stat-card {'ok' if n_warn == 0 else 'warn'}"><div class="num">{n_warn}</div><div class="lbl">ملاحظة نقص محتوى</div></div>
+                <div class="stat-card"><div class="num">{len(subject_files)}</div><div class="lbl">ملف مادة مرفوع</div></div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            with st.expander("🔍 تشخيص: وش اكتُشف من ملفات المواد اللي رفعتيها", expanded=(n_warn > 20)):
+                if tf_summary:
+                    st.table(pd.DataFrame(tf_summary))
+                else:
+                    st.write("ما انقرأ أي محتوى صالح من أي ملف مرفوع.")
+
+            if n_warn == 0:
+                st.markdown('<div class="result-banner ok">✅ تم تعبئة كل الخانات بدون أي نقص محتوى.</div>', unsafe_allow_html=True)
             else:
-                st.write("ما انقرأ أي محتوى صالح من أي ملف مرفوع.")
+                st.markdown(
+                    f'<div class="result-banner warn">⚠️ تم التوليد والتعبئة، لكن فيه <b>{n_warn}</b> ملاحظة '
+                    f'(خانات ناقصة محتوى أو أسابيع غير معروفة):</div>',
+                    unsafe_allow_html=True,
+                )
+                with st.expander("عرض كل الملاحظات", expanded=(n_warn <= 15)):
+                    for w in tf_warnings:
+                        st.write(w)
 
-        if n_warn == 0:
-            st.markdown('<div class="result-banner ok">✅ تم تعبئة كل الخانات بدون أي نقص محتوى.</div>', unsafe_allow_html=True)
-        else:
-            st.markdown(
-                f'<div class="result-banner warn">⚠️ تم التوليد والتعبئة، لكن فيه <b>{n_warn}</b> ملاحظة '
-                f'(خانات ناقصة محتوى أو أسابيع غير معروفة):</div>',
-                unsafe_allow_html=True,
+            st.download_button(
+                label="⬇️ تحميل جدول البث الكامل (Excel)",
+                data=st.session_state["tf_filled_wb_bytes"],
+                file_name="جدول_البث_معبّى.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
             )
-            with st.expander("عرض كل الملاحظات", expanded=(n_warn <= 15)):
-                for w in tf_warnings:
-                    st.write(w)
-
-        st.download_button(
-            label="⬇️ تحميل جدول البث الكامل (Excel)",
-            data=st.session_state["tf_filled_wb_bytes"],
-            file_name="جدول_البث_معبّى.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
+    else:
+        st.markdown(
+            '<div class="result-banner info">ℹ️ ارفعي ملف القالب الفاضي + ملف مادة واحد على الأقل + ملف التقويم الدراسي للمتابعة.</div>',
+            unsafe_allow_html=True,
         )
+
 else:
-    st.markdown(
-        '<div class="result-banner info">ℹ️ ارفعي ملف القالب الفاضي + ملف مادة واحد على الأقل + ملف التقويم الدراسي للمتابعة.</div>',
-        unsafe_allow_html=True,
-    )
+    st.markdown("""
+    <div class="step-card">
+        <div class="step-head">
+            <div class="step-num">🔍</div>
+            <p class="step-title">مقارنة جدولين</p>
+        </div>
+        <p class="step-sub">
+            ارفعي جدول البث اللي طلّعه برنامجنا (المرجع)، وجدول البث اللي سوّاه الفريق يدويًا (بنفس القالب بالضبط) —
+            وبنلوّن لك كل خانة مختلفة بينهم باللون الأحمر داخل نسخة من ملف الفريق.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col_x, col_y = st.columns(2)
+    with col_x:
+        our_file = st.file_uploader("📄 جدول برنامجنا (المرجع)", type=["xlsx"], key="cmp_our")
+    with col_y:
+        team_file = st.file_uploader("👥 جدول الفريق (اللي بنقارنه)", type=["xlsx"], key="cmp_team")
+
+    if our_file and team_file:
+        if st.button("🔍 قارني الجدولين", type="primary"):
+            with st.spinner("جاري المقارنة..."):
+                our_wb = openpyxl.load_workbook(our_file, data_only=True)
+                team_wb = openpyxl.load_workbook(team_file)
+                colored_wb, diffs, cmp_warnings = compare_schedules(our_wb, team_wb)
+                buf = io.BytesIO()
+                colored_wb.save(buf)
+            st.session_state["cmp_result_bytes"] = buf.getvalue()
+            st.session_state["cmp_diffs"] = diffs
+            st.session_state["cmp_warnings"] = cmp_warnings
+
+        if st.session_state.get("cmp_result_bytes"):
+            diffs = st.session_state.get("cmp_diffs", [])
+            cmp_warnings = st.session_state.get("cmp_warnings", [])
+            n_diff = len(diffs)
+
+            st.markdown(f"""
+            <div class="stat-row">
+                <div class="stat-card {'ok' if n_diff == 0 else 'crit'}"><div class="num">{n_diff}</div><div class="lbl">خانة مختلفة</div></div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            for w in cmp_warnings:
+                st.markdown(f'<div class="result-banner warn">{w}</div>', unsafe_allow_html=True)
+
+            if n_diff == 0:
+                st.markdown('<div class="result-banner ok">✅ الجدولين متطابقين تمامًا — ولا خانة مختلفة.</div>', unsafe_allow_html=True)
+            else:
+                st.markdown(
+                    f'<div class="result-banner warn">⚠️ لقينا <b>{n_diff}</b> خانة مختلفة — مفصّلة تحت، ومُلوَّنة بالأحمر داخل الملف المُحمَّل.</div>',
+                    unsafe_allow_html=True,
+                )
+                with st.expander("عرض كل الاختلافات", expanded=(n_diff <= 30)):
+                    st.table(pd.DataFrame(diffs))
+
+            st.download_button(
+                label="⬇️ تحميل جدول الفريق مع تظليل الاختلافات (Excel)",
+                data=st.session_state["cmp_result_bytes"],
+                file_name="مقارنة_جدول_الفريق.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+            )
+    else:
+        st.markdown(
+            '<div class="result-banner info">ℹ️ ارفعي الملفين (جدولنا وجدول الفريق) للمتابعة.</div>',
+            unsafe_allow_html=True,
+        )
