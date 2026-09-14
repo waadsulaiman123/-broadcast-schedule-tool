@@ -707,27 +707,60 @@ def tf_generate_and_fill(template_wb, subject_dfs: dict, calendar_weeks_df=None,
 _CMP_RED_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
 
 
+def _cmp_extract_week_num(sheet_name: str):
+    """يستخرج رقم الأسبوع من اسم الورقة بغضّ النظر عن أي نص زايد حواليه،
+    وبغضّ النظر هل الرقم مكتوب رقمًا (زي 'الأسبوع 3') أو كلمة عربية
+    (زي 'الأسبوع الثالث') — عشان جدولنا وجدول الفريق يتقارنوا بنفس رقم
+    الأسبوع حتى لو صياغة اسم الورقة مختلفة تمامًا."""
+    m = re.search(r"(\d+)", sheet_name)
+    if m:
+        return int(m.group(1))
+
+    norm = _normalize_arabic(sheet_name)
+    for word, num in sorted(WEEK_WORD_TO_NUM.items(), key=lambda kv: -len(kv[0])):
+        if _normalize_arabic(word) in norm:
+            return num
+    return None
+
+
 def compare_schedules(our_wb, team_wb):
     """
     our_wb: الملف اللي طلّعه برنامجنا (المرجع الصحيح)
     team_wb: ملف الفريق (نلوّن الاختلافات فيه ونرجّعه)
     يرجّع: (team_wb الملوَّن، قائمة تفاصيل الاختلافات، قائمة تحذيرات هيكلية)
+
+    المطابقة بين الأوراق تصير **برقم الأسبوع المستخرج من الاسم**، مو بتطابق
+    نص اسم الورقة الكامل — عشان "تربية فكرية - الأسبوع 3" و"أسبوع 3"
+    يتقارنوا صح حتى لو صياغة التسمية مختلفة بين الملفين.
     """
     diffs = []
     warnings = []
 
-    common_sheets = [s for s in team_wb.sheetnames if s in our_wb.sheetnames]
-    missing_in_team = [s for s in our_wb.sheetnames if s not in team_wb.sheetnames]
-    extra_in_team = [s for s in team_wb.sheetnames if s not in our_wb.sheetnames]
+    our_by_week = {}
+    for s in our_wb.sheetnames:
+        w = _cmp_extract_week_num(s)
+        if w is not None:
+            our_by_week.setdefault(w, s)  # أول ورقة بنفس الرقم لو تكررت
+
+    team_by_week = {}
+    for s in team_wb.sheetnames:
+        w = _cmp_extract_week_num(s)
+        if w is not None:
+            team_by_week.setdefault(w, s)
+
+    common_weeks = sorted(set(our_by_week) & set(team_by_week))
+    missing_in_team = sorted(set(our_by_week) - set(team_by_week))
+    extra_in_team = sorted(set(team_by_week) - set(our_by_week))
 
     if missing_in_team:
-        warnings.append(f"⚠️ أوراق موجودة بجدولنا وناقصة بجدول الفريق: {', '.join(missing_in_team)}")
+        warnings.append(f"⚠️ أسابيع موجودة بجدولنا وناقصة بجدول الفريق: {', '.join(map(str, missing_in_team))}")
     if extra_in_team:
-        warnings.append(f"⚠️ أوراق زايدة بجدول الفريق مو موجودة بجدولنا: {', '.join(extra_in_team)}")
+        warnings.append(f"⚠️ أسابيع زايدة بجدول الفريق مو موجودة بجدولنا: {', '.join(map(str, extra_in_team))}")
 
-    for sheet_name in common_sheets:
-        our_ws = our_wb[sheet_name]
-        team_ws = team_wb[sheet_name]
+    for week in common_weeks:
+        our_ws = our_wb[our_by_week[week]]
+        team_ws = team_wb[team_by_week[week]]
+        sheet_name = team_by_week[week]
         blocks = tf_find_grade_blocks(team_ws)
 
         for block in blocks:
