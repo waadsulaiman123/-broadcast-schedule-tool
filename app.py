@@ -343,15 +343,24 @@ TF_PERIOD_NAME_TO_NUM = {
 TF_SKIP_SUBJECTS = {"اجازة"}  # خانات مو مواد حقيقية أصلًا داخل القالب (نادر، احتياط)
 
 
+_TF_GRADE_ORDINALS = ["اول", "ثاني", "ثالث", "رابع", "خامس", "سادس", "سابع", "ثامن", "تاسع", "عاشر"]
+_TF_GRADE_LEVELS = ["ابتدائي", "متوسط", "ثانوي"]
+
+
 def tf_norm_grade(text: str) -> str:
-    """يشيل أي رقم بادئ (زي '1أول ابتدائي' -> 'أول ابتدائي')، وأي "ال" تعريف
-    بادئة (زي 'الثالث ابتدائي' -> 'ثالث ابتدائي') — عشان يتطابق مع القالب
-    بغضّ النظر عن صياغة كل ورقة. **مهم:** ما نشيل أي كلمات زايدة بعد "ابتدائي/
-    متوسط/ثانوي" (زي "فكري") لأنها ممكن تدل على مسار تعليمي منفصل تمامًا
-    (زي مسار الموهوبين) له محتوى مختلف عن الفصل العادي لنفس الصف — خلطهم
-    خطأ محتوى حقيقي، مو مجرد اختلاف تسمية.
-    """
+    """يستخرج نمط الصف (الترتيب + المرحلة) من أي نص، بغضّ النظر عن أي كلمات
+    زايدة قبله أو بعده (زي '1أول ابتدائي فكري' -> 'اول ابتدائي'). هذا مطلوب
+    لأن قوالب بعض المسارات الخاصة (زي التربية الفكرية) تكتب اسم الصف بصياغة
+    عامة ("أول ابتدائي") بينما ملفات موادها تضيف كلمة المسار ("فكري") لنفس
+    الحقل — والمطابقة تصير بينهم فقط لأن كل مسار له قالبه وملفاته في جلسة
+    توليد منفصلة عن المسارات الثانية، فما فيه خطر اختلاط."""
     text = _normalize_arabic(text)
+
+    found_ordinal = next((o for o in _TF_GRADE_ORDINALS if o in text), None)
+    found_level = next((l for l in _TF_GRADE_LEVELS if l in text), None)
+    if found_ordinal and found_level:
+        return f"{found_ordinal} {found_level}"
+
     text = re.sub(r"^\d+", "", text).strip()
     text = re.sub(r"^ال", "", text).strip()
     return text
@@ -418,10 +427,10 @@ TF_SUBJECT_SYNONYM_GROUPS = [
 
 
 def _tf_in_same_synonym_group(a: str, b: str) -> bool:
-    na = _normalize_arabic(a).replace(" ", "")
-    nb = _normalize_arabic(b).replace(" ", "")
+    na = _tf_strip_al_per_word(_normalize_arabic(a))
+    nb = _tf_strip_al_per_word(_normalize_arabic(b))
     for group in TF_SUBJECT_SYNONYM_GROUPS:
-        norm_group = [_normalize_arabic(g).replace(" ", "") for g in group]
+        norm_group = [_tf_strip_al_per_word(_normalize_arabic(g)) for g in group]
         a_in = any(na == g or na in g or g in na for g in norm_group)
         b_in = any(nb == g or nb in g or g in nb for g in norm_group)
         if a_in and b_in:
@@ -429,12 +438,21 @@ def _tf_in_same_synonym_group(a: str, b: str) -> bool:
     return False
 
 
+def _tf_strip_al_per_word(text: str) -> str:
+    """يشيل "ال" التعريف من بداية كل كلمة على حدة (مو النص كامل بس) —
+    عشان 'تربية فنية' و'التربية الفنية' يتطابقوا حتى لو "ال" موجودة
+    على كلمة وحدة بس أو الاثنتين أو ولا وحدة."""
+    words = text.split()
+    stripped = [re.sub(r"^ال", "", w) for w in words]
+    return "".join(stripped)
+
+
 def _tf_subject_match(a: str, b: str) -> bool:
-    """مطابقة مرنة بين اسمين لمادة — تتجاهل المسافات وتقبل الاحتواء الجزئي
-    (مثلاً 'رياضيات' يطابق 'الرياضيات')، بدل التطابق الحرفي الصارم.
+    """مطابقة مرنة بين اسمين لمادة — تتجاهل المسافات و"ال" التعريف على كل
+    كلمة، وتقبل الاحتواء الجزئي (مثلاً 'رياضيات' يطابق 'الرياضيات').
     كمان تتحقق من مجموعات المرادفات المخصّصة (زي لغتي/اللغة العربية)."""
-    na = _normalize_arabic(a).replace(" ", "")
-    nb = _normalize_arabic(b).replace(" ", "")
+    na = _tf_strip_al_per_word(_normalize_arabic(a))
+    nb = _tf_strip_al_per_word(_normalize_arabic(b))
     if not na or not nb:
         return False
     if na == nb or na in nb or nb in na:
@@ -595,6 +613,20 @@ def tf_generate_and_fill(template_wb, subject_dfs: dict, calendar_weeks_df=None,
                             c = new_ws.cell(row=rr, column=col)
                             c.hyperlink = None
                             c.value = None
+
+            # جديد: نمسح كل خانات العنوان/الرابط (غير أيام الإجازة) أول شي،
+            # قبل أي محاولة تعبئة — عشان لو القالب "الفاضي" فيه بقايا قديمة
+            # (روابط من ملف سابق مثلاً)، ما تظهر وكأنها نتيجة صحيحة لما تفشل
+            # مادة معيّنة تلقى محتوى لها.
+            for s in slots:
+                if s["day"] in holiday_days:
+                    continue
+                tr, tc = s["title_cell"]
+                lr, lc = s["link_cell"]
+                new_ws.cell(row=tr, column=tc).hyperlink = None
+                new_ws.cell(row=tr, column=tc).value = None
+                new_ws.cell(row=lr, column=lc).hyperlink = None
+                new_ws.cell(row=lr, column=lc).value = None
 
             # جديد: نجمّع الخانات حسب هوية "المخزون" الفعلي اللي ترجعه المطابقة
             # (id(queue))، مو حسب نص المادة بالضبط — عشان "لغتي" و"اللغة العربية"
