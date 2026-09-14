@@ -66,7 +66,7 @@ st.markdown("""
         background: radial-gradient(circle at 100% 0%, transparent 55%, rgba(108,190,153,.18) 56%, transparent 62%);
     }
     .talemia-logo-pill{ background:#fff; border-radius:10px; padding:5px 10px; display:flex; align-items:center; z-index:2; }
-    .talemia-logo-pill img{ height:30px; display:block; }
+    .talemia-logo-pill img{ height:52px; display:block; }
     .talemia-title-block{ display:flex; align-items:center; gap:14px; z-index:2; }
     .talemia-title-block .t1{ font-family:'Cairo',sans-serif; font-weight:800; font-size:19px; color:#fff; margin:0; }
     .talemia-title-block .t2{ font-size:12.5px; color:var(--teal-light); margin:0; }
@@ -785,7 +785,7 @@ def compare_schedules(our_wb, team_wb):
     return team_wb, diffs, warnings
 
 
-st.caption("النسخة الأولى (Prototype شخصي) — بُنيت للتعلّم والتجربة، بهوية التعليمية 2026")
+st.caption("النسخة الأولى التجريبية")
 st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
 
 
