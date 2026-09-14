@@ -344,7 +344,7 @@ TF_SKIP_SUBJECTS = {"اجازة"}  # خانات مو مواد حقيقية أص�
 
 
 _TF_GRADE_ORDINALS = ["اول", "ثاني", "ثالث", "رابع", "خامس", "سادس", "سابع", "ثامن", "تاسع", "عاشر"]
-_TF_GRADE_LEVELS = ["ابتدائي", "متوسط", "ثانوي"]
+_TF_GRADE_LEVELS = ["ابتدائي", "متوسط", "ثانوي", "تأهيلي", "تاهيلي"]
 
 
 def tf_norm_grade(text: str) -> str:
@@ -355,10 +355,12 @@ def tf_norm_grade(text: str) -> str:
     الحقل — والمطابقة تصير بينهم فقط لأن كل مسار له قالبه وملفاته في جلسة
     توليد منفصلة عن المسارات الثانية، فما فيه خطر اختلاط."""
     text = _normalize_arabic(text)
+    text = text.replace("اولي", "اول")  # "أولى" (صياغة مؤنّثة) تكافئ "أول"
 
     found_ordinal = next((o for o in _TF_GRADE_ORDINALS if o in text), None)
     found_level = next((l for l in _TF_GRADE_LEVELS if l in text), None)
     if found_ordinal and found_level:
+        found_level = "تأهيلي" if found_level == "تاهيلي" else found_level
         return f"{found_ordinal} {found_level}"
 
     text = re.sub(r"^\d+", "", text).strip()
