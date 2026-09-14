@@ -14,12 +14,8 @@ app.py — نظام إدارة جداول البث (النسخة الأولى ا
 import streamlit as st
 import pandas as pd
 import openpyxl
-from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment, PatternFill
 import io
-import zipfile
 import re
-import requests
 import base64
 from pathlib import Path
 
@@ -82,6 +78,45 @@ st.markdown("""
     .stat-card.crit{ border-top-color: var(--crit); }
     .stat-card .num{ font-family:'Cairo',sans-serif; font-weight:800; font-size:26px; color:var(--navy); }
     .stat-card .lbl{ font-size:12px; color:var(--gray); margin-top:4px; }
+
+    /* جديد: بطاقات خطوات مرقّمة بهوية التعليمية */
+    .step-card{
+        background:#fff; border:1px solid #E2ECE8; border-radius:16px;
+        padding:20px 24px; margin-bottom:20px; box-shadow:0 2px 10px rgba(34,87,123,.05);
+    }
+    .step-card .step-head{ display:flex; align-items:center; gap:12px; margin-bottom:4px; }
+    .step-card .step-num{
+        background:var(--navy); color:#fff; width:34px; height:34px; border-radius:10px;
+        display:flex; align-items:center; justify-content:center; font-family:'Cairo',sans-serif;
+        font-weight:800; font-size:16px; flex-shrink:0;
+    }
+    .step-card .step-title{ font-family:'Cairo',sans-serif; font-weight:800; font-size:18px; color:var(--navy); margin:0; }
+    .step-card .step-sub{ font-size:13px; color:var(--gray); margin:6px 0 16px 46px; line-height:1.7; }
+
+    /* جديد: تنبيهات مخصّصة بهوية متسقة بدل صناديق ستريم لِت الافتراضية */
+    .result-banner{ border-radius:12px; padding:14px 18px; margin:10px 0; font-size:14.5px; font-weight:600; display:flex; align-items:center; gap:10px; }
+    .result-banner.ok{ background:var(--ok-bg); color:var(--ok); border:1px solid #BFE3D2; }
+    .result-banner.warn{ background:var(--warn-bg); color:#8a6a13; border:1px solid #F0DFA8; }
+    .result-banner.info{ background:#EAF2F8; color:var(--navy); border:1px solid #CBDDEA; }
+
+    /* جديد: تحسين شكل أزرار الرفع الأساسية */
+    .stButton > button{
+        border-radius:12px !important; font-family:'Cairo',sans-serif !important; font-weight:800 !important;
+        padding:10px 22px !important; box-shadow:0 3px 10px rgba(34,87,123,.12) !important;
+        transition: transform .12s ease !important;
+    }
+    .stButton > button:hover{ transform: translateY(-1px); }
+    .stButton > button[kind="primary"]{ background: var(--navy) !important; border-color: var(--navy) !important; }
+
+    /* جديد: تمييز الفصل الدراسي المختار بشكل أوضح */
+    div[role="radiogroup"] label{
+        border:1.5px solid #E2ECE8 !important; border-radius:10px !important; padding:6px 18px !important;
+        margin-inline-start:6px !important; transition: all .15s ease !important;
+    }
+
+    /* جديد: خلفية عامة هادئة وفواصل أنظف */
+    [data-testid="stAppViewContainer"] > .main{ background: #F7FAF9; }
+    hr{ margin:28px 0 !important; border-color:#E2ECE8 !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -453,6 +488,15 @@ def tf_build_sequential_index(subject_dfs: dict):
             else:
                 grade = tf_norm_grade(str(sheet_key))
 
+            # جديد: اسم المادة يُقرأ من عمود "المادة" جوا الملف نفسه (بدل
+            # الاعتماد على اسم الملف اللي رفعتيه) — أوثق، خصوصًا لو ملفات
+            # نفس المادة تختلف تسميتها من ملف لآخر. لو العمود غير موجود أو
+            # فاضي، نرجع لاسم الملف كخطة احتياطية.
+            if "المادة" in df.columns and df["المادة"].notna().any():
+                effective_subject = str(df["المادة"].dropna().iloc[0]).strip()
+            else:
+                effective_subject = subject_name
+
             # جديد: ما نرتّب حسب "ترتيب البث" إطلاقًا — نثق بترتيب الصفوف
             # الطبيعي بالملف كما هو، عشان أي درس (عادي أو إثرائي بدون رقم)
             # يبقى بمكانه الأصلي بالضبط، مو ينزاح لآخر القائمة.
@@ -462,11 +506,11 @@ def tf_build_sequential_index(subject_dfs: dict):
                 (row["عنوان_الدرس"], row[link_col] if link_col else "")
                 for _, row in df.iterrows()
             ]
-            key = (subject_name, grade)
+            key = (effective_subject, grade)
             index.setdefault(key, []).extend(pairs)
 
             summary.append({
-                "الملف": subject_name, "الصف_المكتشف": grade,
+                "الملف": subject_name, "المادة_المكتشفة": effective_subject, "الصف_المكتشف": grade,
                 "عدد_الدروس": len(pairs),
             })
     return index, summary
@@ -611,25 +655,35 @@ def tf_generate_and_fill(template_wb, subject_dfs: dict, calendar_weeks_df=None,
 # الواجهة
 # ============================================================
 st.caption("النسخة الأولى (Prototype شخصي) — بُنيت للتعلّم والتجربة، بهوية التعليمية 2026")
-st.divider()
+st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
 
-st.header("١. رفع الملفات")
-st.caption(
-    "ارفعي ملف \"جدول البث\" — قالب أسبوع واحد فاضٍ (خانات المواد معبّاة، عنوان الدرس ورابط اليوتيوب فاضيين) "
-    "+ ملف أو أكثر لكل مادة (فيه عنوان الدرس ورابط اليوتيوب مرتبين بنفس تسلسل الحصص) "
-    "+ ملف التقويم الدراسي (فيه ورقتين: الأسابيع + الإجازات)."
-)
+st.markdown("""
+<div class="step-card">
+    <div class="step-head">
+        <div class="step-num">١</div>
+        <p class="step-title">رفع الملفات</p>
+    </div>
+    <p class="step-sub">
+        ارفعي ملف "جدول البث" — قالب أسبوع واحد فاضٍ (خانات المواد معبّاة، عنوان الدرس ورابط اليوتيوب فاضيين)،
+        ملف أو أكثر لكل مادة (فيه عنوان الدرس ورابط اليوتيوب مرتبين بنفس تسلسل الحصص)،
+        وملف التقويم الدراسي (فيه ورقتين: الأسابيع + الإجازات).
+    </p>
+</div>
+""", unsafe_allow_html=True)
 
-template_file = st.file_uploader("ملف جدول البث (القالب الفاضي — أسبوع واحد)", type=["xlsx"], key="tf_template")
-subject_files = st.file_uploader(
-    "ملفات المواد (وحدة أو أكثر — اسم كل ملف يُعتبر اسم المادة)",
-    type=["xlsx"], accept_multiple_files=True, key="tf_subjects",
-)
-calendar_file = st.file_uploader(
-    "ملف التقويم الدراسي (فيه ورقتين: الأسابيع + الإجازات) — لتوليد الأسابيع وتحديد أيام الإجازة تلقائيًا",
-    type=["xlsx"], key="tf_calendar",
-)
-target_semester = st.radio("الفصل الدراسي المطلوب توليده", ["الأول", "الثاني"], horizontal=True)
+col_a, col_b = st.columns(2)
+with col_a:
+    template_file = st.file_uploader("📋 ملف جدول البث (القالب الفاضي — أسبوع واحد)", type=["xlsx"], key="tf_template")
+    calendar_file = st.file_uploader(
+        "🗓️ ملف التقويم الدراسي (الأسابيع + الإجازات)",
+        type=["xlsx"], key="tf_calendar",
+    )
+with col_b:
+    subject_files = st.file_uploader(
+        "📚 ملفات المواد (وحدة أو أكثر — اسم كل ملف يُعتبر اسم المادة)",
+        type=["xlsx"], accept_multiple_files=True, key="tf_subjects",
+    )
+    target_semester = st.radio("📆 الفصل الدراسي المطلوب توليده", ["الأول", "الثاني"], horizontal=True)
 
 if template_file and subject_files and calendar_file:
     subject_dfs = {}
@@ -641,19 +695,31 @@ if template_file and subject_files and calendar_file:
         calendar_weeks_df = pd.read_excel(calendar_file, sheet_name="الأسابيع")
         holidays_df = pd.read_excel(calendar_file, sheet_name="الإجازات")
     except Exception as e:
-        st.error(f"⚠️ ما قدرنا نقرأ ملف التقويم — تأكدي إن فيه ورقتين بالاسم بالضبط \"الأسابيع\" و\"الإجازات\" ({type(e).__name__}).")
+        st.markdown(
+            f'<div class="result-banner warn">⚠️ ما قدرنا نقرأ ملف التقويم — تأكدي إن فيه ورقتين بالاسم بالضبط '
+            f'"الأسابيع" و"الإجازات" ({type(e).__name__}).</div>',
+            unsafe_allow_html=True,
+        )
         st.stop()
 
-    st.divider()
-    st.header("٢. توليد وتعبئة الجدول")
+    st.markdown("""
+    <div class="step-card">
+        <div class="step-head">
+            <div class="step-num">٢</div>
+            <p class="step-title">توليد وتعبئة الجدول</p>
+        </div>
+        <p class="step-sub">اضغطي الزر وانتظري — البرنامج يولّد أسابيع الفصل المختار كاملة ويعبّيها من ملفات موادك.</p>
+    </div>
+    """, unsafe_allow_html=True)
 
     if st.button("🧩 ولّدي الأسابيع وعبّي القالب", type="primary"):
-        template_wb = openpyxl.load_workbook(template_file, data_only=True)
-        filled_wb, tf_warnings, tf_summary = tf_generate_and_fill(
-            template_wb, subject_dfs, calendar_weeks_df, holidays_df, target_semester=target_semester
-        )
-        buf = io.BytesIO()
-        filled_wb.save(buf)
+        with st.spinner("جاري التوليد والتعبئة..."):
+            template_wb = openpyxl.load_workbook(template_file, data_only=True)
+            filled_wb, tf_warnings, tf_summary = tf_generate_and_fill(
+                template_wb, subject_dfs, calendar_weeks_df, holidays_df, target_semester=target_semester
+            )
+            buf = io.BytesIO()
+            filled_wb.save(buf)
         st.session_state["tf_filled_wb_bytes"] = buf.getvalue()
         st.session_state["tf_warnings"] = tf_warnings
         st.session_state["tf_summary"] = tf_summary
@@ -663,8 +729,15 @@ if template_file and subject_files and calendar_file:
         tf_warnings = st.session_state.get("tf_warnings", [])
         tf_summary = st.session_state.get("tf_summary", [])
         n_warn = len(tf_warnings)
+        n_weeks = st.session_state.get('tf_n_weeks', 0)
 
-        st.info(f"📄 تم توليد **{st.session_state.get('tf_n_weeks', 0)}** ورقة أسبوع في الملف الناتج.")
+        st.markdown(f"""
+        <div class="stat-row">
+            <div class="stat-card ok"><div class="num">{n_weeks}</div><div class="lbl">أسبوع تم توليده</div></div>
+            <div class="stat-card {'ok' if n_warn == 0 else 'warn'}"><div class="num">{n_warn}</div><div class="lbl">ملاحظة نقص محتوى</div></div>
+            <div class="stat-card"><div class="num">{len(subject_files)}</div><div class="lbl">ملف مادة مرفوع</div></div>
+        </div>
+        """, unsafe_allow_html=True)
 
         with st.expander("🔍 تشخيص: وش اكتُشف من ملفات المواد اللي رفعتيها", expanded=(n_warn > 20)):
             if tf_summary:
@@ -673,9 +746,13 @@ if template_file and subject_files and calendar_file:
                 st.write("ما انقرأ أي محتوى صالح من أي ملف مرفوع.")
 
         if n_warn == 0:
-            st.success("✅ تم تعبئة كل الخانات بدون أي نقص محتوى.")
+            st.markdown('<div class="result-banner ok">✅ تم تعبئة كل الخانات بدون أي نقص محتوى.</div>', unsafe_allow_html=True)
         else:
-            st.warning(f"⚠️ تم التوليد والتعبئة، لكن فيه **{n_warn}** ملاحظة (خانات ناقصة محتوى أو أسابيع غير معروفة):")
+            st.markdown(
+                f'<div class="result-banner warn">⚠️ تم التوليد والتعبئة، لكن فيه <b>{n_warn}</b> ملاحظة '
+                f'(خانات ناقصة محتوى أو أسابيع غير معروفة):</div>',
+                unsafe_allow_html=True,
+            )
             with st.expander("عرض كل الملاحظات", expanded=(n_warn <= 15)):
                 for w in tf_warnings:
                     st.write(w)
@@ -685,6 +762,10 @@ if template_file and subject_files and calendar_file:
             data=st.session_state["tf_filled_wb_bytes"],
             file_name="جدول_البث_معبّى.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
         )
 else:
-    st.info("ارفعي ملف القالب الفاضي + ملف مادة واحد على الأقل + ملف التقويم الدراسي للمتابعة.")
+    st.markdown(
+        '<div class="result-banner info">ℹ️ ارفعي ملف القالب الفاضي + ملف مادة واحد على الأقل + ملف التقويم الدراسي للمتابعة.</div>',
+        unsafe_allow_html=True,
+    )
