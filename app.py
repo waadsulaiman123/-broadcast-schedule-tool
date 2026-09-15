@@ -14,7 +14,7 @@ app.py — نظام إدارة جداول البث (النسخة الأولى ا
 import streamlit as st
 import pandas as pd
 import openpyxl
-from openpyxl.styles import PatternFill
+from openpyxl.styles import PatternFill, Font
 import io
 import re
 import base64
@@ -369,6 +369,54 @@ def tf_norm_grade(text: str) -> str:
     return text
 
 
+# ============================================================
+# جديد: دعم مسارات المرحلة الثانوية — المرحلة الثانوية مقسّمة لمسارات
+# (عام، حاسب وهندسة، صحة وحياة، إدارة أعمال، شرعي)، وأحيانًا ملف مادة
+# واحد يذكر أكثر من مسار مع بعض بنفس الخانة (زي "العام والصحة والحياة")
+# لأن هذي المسارات تتشارك نفس محتوى المادة — فنسجّل هذا المحتوى تحت
+# **كل مسار مذكور لحاله**، عشان أي بلوك بالقالب يلقى محتواه الصحيح.
+# ============================================================
+_TF_TRACK_KEYWORDS = [
+    ("علوم الحاسب والهندسة", "حاسب_هندسة"),
+    ("الحاسب والهندسة", "حاسب_هندسة"),
+    ("الصحة والحياة", "صحة_حياة"),
+    ("إدارة الأعمال", "ادارة_اعمال"),
+    ("الشرعي", "شرعي"),
+    ("العام", "عام"),
+]
+_TF_YEAR_WORDS = {
+    "الأولى": "اول", "الاولى": "اول", "الأول": "اول",
+    "الثانية": "ثاني", "الثاني": "ثاني",
+    "الثالثة": "ثالث", "الثالث": "ثالث",
+}
+
+
+def _tf_extract_year(text: str):
+    norm = _normalize_arabic(text)
+    for word, canon in sorted(_TF_YEAR_WORDS.items(), key=lambda kv: -len(kv[0])):
+        if _normalize_arabic(word) in norm:
+            return canon
+    return None
+
+
+def tf_grade_keys_for_matching(text: str) -> list:
+    """يرجّع قائمة بمفتاح واحد أو أكثر لنص الصف — أكثر من مفتاح لو النص
+    يذكر أكثر من مسار ثانوي مشترك بنفس الخانة (زي 'العام والصحة والحياة'
+    -> مفتاحين منفصلين، واحد لكل مسار). لو ما فيه أي مسار مذكور، يرجع
+    لنفس سلوك tf_norm_grade العادي (صف ابتدائي/متوسط عادي) بدون أي تغيير."""
+    tracks_found = set()
+    norm = _normalize_arabic(text)
+    for kw, canon in _TF_TRACK_KEYWORDS:
+        if _normalize_arabic(kw) in norm:
+            tracks_found.add(canon)
+
+    if tracks_found:
+        year = _tf_extract_year(text) or ""
+        return [f"{year}_{t}".strip("_") for t in sorted(tracks_found)]
+
+    return [tf_norm_grade(text)]
+
+
 def tf_find_grade_blocks(ws):
     """يدور على كل بلوكات الصفوف داخل ورقة القالب (لازم يكون فيها 'اليوم' و'الحصة' برأس كل بلوك)."""
     blocks = []
@@ -514,36 +562,49 @@ def tf_build_sequential_index(subject_dfs: dict):
                 })
                 continue
 
-            if "الصف" in df.columns and df["الصف"].notna().any():
-                grade = tf_norm_grade(str(df["الصف"].dropna().iloc[0]))
-            else:
-                grade = tf_norm_grade(str(sheet_key))
-
-            # جديد: اسم المادة يُقرأ من عمود "المادة" جوا الملف نفسه (بدل
-            # الاعتماد على اسم الملف اللي رفعتيه) — أوثق، خصوصًا لو ملفات
-            # نفس المادة تختلف تسميتها من ملف لآخر. لو العمود غير موجود أو
-            # فاضي، نرجع لاسم الملف كخطة احتياطية.
-            if "المادة" in df.columns and df["المادة"].notna().any():
-                effective_subject = str(df["المادة"].dropna().iloc[0]).strip()
-            else:
-                effective_subject = subject_name
-
-            # جديد: ما نرتّب حسب "ترتيب البث" إطلاقًا — نثق بترتيب الصفوف
-            # الطبيعي بالملف كما هو، عشان أي درس (عادي أو إثرائي بدون رقم)
-            # يبقى بمكانه الأصلي بالضبط، مو ينزاح لآخر القائمة.
-
             link_col = "رابط_يوتيوب" if "رابط_يوتيوب" in df.columns else None
-            pairs = [
-                (row["عنوان_الدرس"], row[link_col] if link_col else "")
-                for _, row in df.iterrows()
-            ]
-            key = (effective_subject, grade)
-            index.setdefault(key, []).extend(pairs)
 
-            summary.append({
-                "الملف": subject_name, "المادة_المكتشفة": effective_subject, "الصف_المكتشف": grade,
-                "عدد_الدروس": len(pairs),
-            })
+            # جديد: نجمّع الصفوف حسب قيمة "الصف" لحالها (مو نأخذ أول قيمة
+            # بس ونطبّقها على كل الملف) — عشان ملفات فيها أكثر من مسار/صف
+            # بنفس الشيت (زي المرحلة الثانوية) تنفصل صح، كل مجموعة بترتيبها
+            # الطبيعي الخاص، بدل ما تختلط ببعض أو تضيع.
+            if "الصف" in df.columns and df["الصف"].notna().any():
+                grade_groups = list(df.groupby(df["الصف"], sort=False))
+            else:
+                grade_groups = [(str(sheet_key), df)]
+
+            for grade_value, group_df in grade_groups:
+                grade_keys = tf_grade_keys_for_matching(str(grade_value))
+
+                # جديد: اسم المادة يُقرأ من عمود "المادة" جوا الملف نفسه (بدل
+                # الاعتماد على اسم الملف اللي رفعتيه) — أوثق، خصوصًا لو ملفات
+                # نفس المادة تختلف تسميتها من ملف لآخر. لو العمود غير موجود أو
+                # فاضي، نرجع لاسم الملف كخطة احتياطية.
+                if "المادة" in group_df.columns and group_df["المادة"].notna().any():
+                    effective_subject = str(group_df["المادة"].dropna().iloc[0]).strip()
+                else:
+                    effective_subject = subject_name
+
+                # جديد: ما نرتّب حسب "ترتيب البث" إطلاقًا — نثق بترتيب الصفوف
+                # الطبيعي بالملف كما هو، عشان أي درس (عادي أو إثرائي بدون رقم)
+                # يبقى بمكانه الأصلي بالضبط، مو ينزاح لآخر القائمة.
+                pairs = [
+                    (row["عنوان_الدرس"], row[link_col] if link_col else "")
+                    for _, row in group_df.iterrows()
+                ]
+
+                # جديد: لو الصف يذكر أكثر من مسار ثانوي مشترك بنفس الخانة (زي
+                # "العام والصحة والحياة")، نسجّل نفس المحتوى تحت كل مسار لحاله
+                # عشان أي بلوك بالقالب يلقى محتواه الصحيح.
+                for grade in grade_keys:
+                    key = (effective_subject, grade)
+                    index.setdefault(key, []).extend(pairs)
+
+                summary.append({
+                    "الملف": subject_name, "المادة_المكتشفة": effective_subject,
+                    "الصف_المكتشف": "، ".join(grade_keys),
+                    "عدد_الدروس": len(pairs),
+                })
     return index, summary
 
 
@@ -605,7 +666,9 @@ def tf_generate_and_fill(template_wb, subject_dfs: dict, calendar_weeks_df=None,
                 holiday_days.add(day)
 
         for block in blocks:
-            grade = tf_norm_grade(block["grade"] or "")
+            # جديد: نستخدم نفس دالة استخراج مفاتيح المسارات — بلوك القالب
+            # دايمًا مسار واحد بس، فناخذ أول (ووحيد) مفتاح ترجّعه.
+            grade = tf_grade_keys_for_matching(block["grade"] or "")[0]
             slots = tf_get_slots_for_block(new_ws, block)
 
             # نحط "إجازة" بالأيام المعطّلة كاملة، ونمسح خانات العنوان/الرابط فيها
@@ -704,7 +767,8 @@ def tf_generate_and_fill(template_wb, subject_dfs: dict, calendar_weeks_df=None,
 # نفحص كل خانة (مادة/عنوان درس/رابط) ونلوّن أي اختلاف بالأحمر في نسخة
 # من ملف الفريق، ونرجّع قائمة بكل الاختلافات المكتشفة.
 # ============================================================
-_CMP_RED_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+_CMP_RED_FILL = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
+_CMP_RED_FONT = Font(color="FFFFFF", bold=True)
 
 
 def _cmp_extract_week_num(sheet_name: str):
@@ -775,7 +839,9 @@ def compare_schedules(our_wb, team_wb):
                     our_norm = str(our_val).strip() if our_val is not None else ""
                     team_norm = str(team_val).strip() if team_val is not None else ""
                     if our_norm != team_norm:
-                        team_ws.cell(row=r, column=c).fill = _CMP_RED_FILL
+                        cell = team_ws.cell(row=r, column=c)
+                        cell.fill = _CMP_RED_FILL
+                        cell.font = _CMP_RED_FONT
                         diffs.append({
                             "الورقة": sheet_name, "الصف": block["grade"], "اليوم": slot["day"],
                             "الحصة": slot["period"], "الحقل": field_name,
