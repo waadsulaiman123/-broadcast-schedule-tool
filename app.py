@@ -402,10 +402,19 @@ def _tf_extract_year(text: str):
 def tf_grade_keys_for_matching(text: str) -> list:
     """يرجّع قائمة بمفتاح واحد أو أكثر لنص الصف — أكثر من مفتاح لو النص
     يذكر أكثر من مسار ثانوي مشترك بنفس الخانة (زي 'العام والصحة والحياة'
-    -> مفتاحين منفصلين، واحد لكل مسار). لو ما فيه أي مسار مذكور، يرجع
-    لنفس سلوك tf_norm_grade العادي (صف ابتدائي/متوسط عادي) بدون أي تغيير."""
-    tracks_found = set()
+    -> مفتاحين منفصلين، واحد لكل مسار)، أو لو كتب "جميع المسارات" صراحة
+    (-> كل المسارات الخمسة). لو ما فيه أي مسار مذكور، يرجع لنفس سلوك
+    tf_norm_grade العادي (صف ابتدائي/متوسط عادي) بدون أي تغيير."""
     norm = _normalize_arabic(text)
+
+    # جديد: "جميع/كل المسارات" — تشمل كل المسارات الخمسة المعروفة، بدون
+    # حاجة نذكر كل واحد لحاله بالنص.
+    if ("جميع" in norm or "كل" in norm) and "مسار" in norm:
+        year = _tf_extract_year(text) or ""
+        all_tracks = sorted({canon for _, canon in _TF_TRACK_KEYWORDS})
+        return [f"{year}_{t}".strip("_") for t in all_tracks]
+
+    tracks_found = set()
     for kw, canon in _TF_TRACK_KEYWORDS:
         if _normalize_arabic(kw) in norm:
             tracks_found.add(canon)
@@ -597,7 +606,16 @@ def tf_build_sequential_index(subject_dfs: dict):
                 # "العام والصحة والحياة")، نسجّل نفس المحتوى تحت كل مسار لحاله
                 # عشان أي بلوك بالقالب يلقى محتواه الصحيح.
                 for grade in grade_keys:
-                    key = (effective_subject, grade)
+                    # جديد: ندمج مع أي مفتاح موجود لنفس الصف يتطابق مرن مع
+                    # اسم المادة (بدل ما نسوي مخزون منفصل لكل اختلاف إملائي
+                    # بسيط بنفس المادة — زي صف وحيد كاتب "الانجليزية" بدون
+                    # همزة بين مئات الصفوف اللي كاتبينها بالهمزة).
+                    merged_key = None
+                    for existing_subject, existing_grade in index.keys():
+                        if existing_grade == grade and _tf_subject_match(effective_subject, existing_subject):
+                            merged_key = (existing_subject, existing_grade)
+                            break
+                    key = merged_key or (effective_subject, grade)
                     index.setdefault(key, []).extend(pairs)
 
                 summary.append({
