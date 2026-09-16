@@ -526,6 +526,32 @@ def _tf_subject_match(a: str, b: str) -> bool:
     return _tf_in_same_synonym_group(a, b)
 
 
+def tf_read_excel_visible_only(file_like) -> dict:
+    """يقرأ ملف إكسل (كل أوراقه) زي pd.read_excel(sheet_name=None) العادي،
+    لكن **يتجاهل أي صف مخفي بالكامل** (سواء أُخفي يدويًا أو صار مستبعد
+    عبر فلتر) — عشان صفوف ألغاها فريق المحتوى عمدًا (مكررة أو خطأ) ما
+    تدخل بالغلط ضمن بيانات التوليد."""
+    wb = openpyxl.load_workbook(file_like, data_only=True)
+    sheets = {}
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        if ws.max_row < 1:
+            sheets[sheet_name] = pd.DataFrame()
+            continue
+        header = [cell.value for cell in ws[1]]
+        n_cols = len(header)
+        rows = []
+        for row_idx in range(2, ws.max_row + 1):
+            if ws.row_dimensions[row_idx].hidden:
+                continue
+            row_vals = [ws.cell(row=row_idx, column=c + 1).value for c in range(n_cols)]
+            if all(v is None for v in row_vals):
+                continue  # صف فاضي تمامًا، نتجاهله زي ما pandas يسوي أصلاً
+            rows.append(row_vals)
+        sheets[sheet_name] = pd.DataFrame(rows, columns=header)
+    return sheets
+
+
 def _tf_normalize_subject_df(raw_df):
     """يرجّع {sheet_key: DataFrame مطبَّع} من DataFrame وحيد أو dict أوراق."""
     return {"_single": raw_df} if not isinstance(raw_df, dict) else raw_df
@@ -919,7 +945,7 @@ if app_mode == "🧩 توليد جدول جديد":
         subject_dfs = {}
         for f in subject_files:
             subject_name = f.name.rsplit(".", 1)[0]
-            subject_dfs[subject_name] = pd.read_excel(f, sheet_name=None)
+            subject_dfs[subject_name] = tf_read_excel_visible_only(f)
 
         st.markdown("""
         <div class="step-card">
