@@ -561,6 +561,7 @@ def tf_build_sequential_index(subject_dfs: dict):
     """
     index = {}
     summary = []
+    merges = []  # جديد: نسجّل كل حالة دمج تلقائي (اختلاف إملائي بسيط انضم لمخزون موجود)
     for subject_name, raw_df in subject_dfs.items():
         for sheet_key, df in _tf_normalize_subject_df(raw_df).items():
             df = normalize_columns(df)
@@ -615,6 +616,11 @@ def tf_build_sequential_index(subject_dfs: dict):
                         if existing_grade == grade and _tf_subject_match(effective_subject, existing_subject):
                             merged_key = (existing_subject, existing_grade)
                             break
+                    if merged_key and merged_key[0] != effective_subject:
+                        merges.append({
+                            "الملف": subject_name, "الصف": grade,
+                            "اسم مكتشف": effective_subject, "انضم إلى": merged_key[0],
+                        })
                     key = merged_key or (effective_subject, grade)
                     index.setdefault(key, []).extend(pairs)
 
@@ -623,7 +629,7 @@ def tf_build_sequential_index(subject_dfs: dict):
                     "الصف_المكتشف": "، ".join(grade_keys),
                     "عدد_الدروس": len(pairs),
                 })
-    return index, summary
+    return index, summary, merges
 
 
 def tf_lookup_sequential_queue(index: dict, template_subject: str, grade: str):
@@ -645,7 +651,7 @@ def tf_generate_and_fill(template_wb, subject_dfs: dict, calendar_weeks_df=None,
     داخل ملفها، بغضّ النظر تمامًا عن أي رقم أسبوع مكتوب هناك).
     يرجّع: (الملف الناتج، تحذيرات، تشخيص المحتوى)
     """
-    content_index, content_summary = tf_build_sequential_index(subject_dfs)
+    content_index, content_summary, _content_merges = tf_build_sequential_index(subject_dfs)
     warnings = []
 
     have_calendar = calendar_weeks_df is not None and holidays_df is not None
@@ -914,6 +920,52 @@ if app_mode == "🧩 توليد جدول جديد":
         for f in subject_files:
             subject_name = f.name.rsplit(".", 1)[0]
             subject_dfs[subject_name] = pd.read_excel(f, sheet_name=None)
+
+        st.markdown("""
+        <div class="step-card">
+            <div class="step-head">
+                <div class="step-num">🔍</div>
+                <p class="step-title">فحص سريع (اختياري، قبل التوليد)</p>
+            </div>
+            <p class="step-sub">يفحص كل ملفات المواد بثواني ويوريك كل مادة وصف اكتشفهم، وأي حالة دمج تلقائي صارت
+            (زي اختلاف إملائي بسيط بنفس المادة) — عشان تتأكدي إن كل شي مضبوط قبل ما تولّدين الجدول كامل.</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if st.button("🔍 افحصي الملفات الآن"):
+            with st.spinner("جاري الفحص..."):
+                _pf_index, _pf_summary, _pf_merges = tf_build_sequential_index(subject_dfs)
+            st.session_state["pf_summary"] = _pf_summary
+            st.session_state["pf_merges"] = _pf_merges
+
+        if st.session_state.get("pf_summary"):
+            pf_summary = st.session_state["pf_summary"]
+            pf_merges = st.session_state.get("pf_merges", [])
+            total_lessons = sum(s.get("عدد_الدروس", 0) for s in pf_summary)
+            n_issues = sum(1 for s in pf_summary if "المشكلة" in s)
+
+            st.markdown(f"""
+            <div class="stat-row">
+                <div class="stat-card"><div class="num">{len(subject_files)}</div><div class="lbl">ملف مادة</div></div>
+                <div class="stat-card"><div class="num">{total_lessons}</div><div class="lbl">درس إجمالي مكتشف</div></div>
+                <div class="stat-card {'ok' if not pf_merges else 'warn'}"><div class="num">{len(pf_merges)}</div><div class="lbl">حالة دمج تلقائي</div></div>
+                <div class="stat-card {'ok' if not n_issues else 'crit'}"><div class="num">{n_issues}</div><div class="lbl">ملف فيه مشكلة قراءة</div></div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            if pf_merges:
+                st.markdown(
+                    '<div class="result-banner warn">⚠️ صارت دمجات تلقائية لأسماء متشابهة — تأكدي إنها صحيحة قبل المتابعة:</div>',
+                    unsafe_allow_html=True,
+                )
+                st.table(pd.DataFrame(pf_merges))
+            else:
+                st.markdown('<div class="result-banner ok">✅ ما فيه أي دمج تلقائي مشكوك فيه.</div>', unsafe_allow_html=True)
+
+            with st.expander("عرض تفاصيل كل ملف", expanded=(n_issues > 0)):
+                st.table(pd.DataFrame(pf_summary))
+
+        st.divider()
 
         try:
             calendar_weeks_df = pd.read_excel(calendar_file, sheet_name="الأسابيع")
