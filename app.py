@@ -360,6 +360,13 @@ def tf_norm_grade(text: str) -> str:
 
     found_ordinal = next((o for o in _TF_GRADE_ORDINALS if o in text), None)
     found_level = next((l for l in _TF_GRADE_LEVELS if l in text), None)
+
+    # جديد: "السنة الأولى المشتركة" — صيغة تُستخدم للسنة الأولى الثانوية
+    # (قبل تقسيم الطلاب لمسارات) بدون ما تذكر كلمة "ثانوي" صراحة. نتعرّف
+    # عليها عبر كلمة "مشترك" (لما ما فيه أي مرحلة تعليمية ثانية مذكورة).
+    if not found_level and "مشترك" in text:
+        found_level = "ثانوي"
+
     if found_ordinal and found_level:
         found_level = "تأهيلي" if found_level == "تاهيلي" else found_level
         return f"{found_ordinal} {found_level}"
@@ -669,13 +676,23 @@ def tf_generate_and_fill(template_wb, subject_dfs: dict, calendar_weeks_df=None,
         warnings.append(f"⚠️ ما لقينا أي أسبوع للفصل {semester} في ملف التقويم.")
         return template_wb, warnings, content_summary
 
-    blank_ws = template_wb.worksheets[0]
-    blank_name = blank_ws.title
-    blocks = tf_find_grade_blocks(blank_ws)  # الهيكل ثابت، نحسبه مرة وحدة من القالب الفاضي
+    # جديد: بدل ما نفترض إن أول ورقة بالملف هي القالب دائمًا، ندوّر على
+    # أول ورقة فيها بلوك صف حقيقي (نبحث عن "اليوم"+"الحصة") — عشان ملفات
+    # فيها ورقة فاضية إضافية (زي "Sheet1" افتراضية) ما تكسر القراءة.
+    blank_ws = None
+    blocks = []
+    for ws_candidate in template_wb.worksheets:
+        candidate_blocks = tf_find_grade_blocks(ws_candidate)
+        if candidate_blocks:
+            blank_ws = ws_candidate
+            blocks = candidate_blocks
+            break
 
-    if not blocks:
-        warnings.append("⚠️ ما لقينا أي بلوك صف داخل القالب (نبحث عن خلية \"اليوم\" وجنبها \"الحصة\") — تأكدي من شكل القالب.")
+    if blank_ws is None:
+        warnings.append("⚠️ ما لقينا أي بلوك صف داخل أي ورقة بالملف (نبحث عن خلية \"اليوم\" وجنبها \"الحصة\") — تأكدي من شكل القالب.")
         return template_wb, warnings, content_summary
+
+    blank_name = blank_ws.title
 
     # مؤشر تقدّم لكل (مادة، صف) — يتقدّم بثبات عبر كل الأسابيع بالتتابع
     cursors = {}
