@@ -538,8 +538,24 @@ def tf_read_excel_visible_only(file_like) -> dict:
         if ws.max_row < 1:
             sheets[sheet_name] = pd.DataFrame()
             continue
-        header = [cell.value for cell in ws[1]]
-        n_cols = len(header)
+        raw_header = [cell.value for cell in ws[1]]
+        n_cols = len(raw_header)
+
+        # جديد: نتعامل مع عناوين مكررة أو فاضية بنفس أسلوب pandas (يضيف
+        # لاحقة .1, .2... للمكرر) — عشان عمود "الحصة" (مثلاً) لو تكرر
+        # برأس الملف، ما يصير عمودين بنفس الاسم بالضبط في الـ DataFrame
+        # (وهذا كان يكسر أي .apply() على ذاك العمود لاحقًا في normalize_columns).
+        seen = {}
+        header = []
+        for i, h in enumerate(raw_header):
+            name = str(h).strip() if h is not None else f"Unnamed: {i}"
+            if name in seen:
+                seen[name] += 1
+                header.append(f"{name}.{seen[name]}")
+            else:
+                seen[name] = 0
+                header.append(name)
+
         rows = []
         for row_idx in range(2, ws.max_row + 1):
             if ws.row_dimensions[row_idx].hidden:
